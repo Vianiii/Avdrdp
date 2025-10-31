@@ -9,89 +9,73 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Install VNC Server (x11vnc)
+      - name: Install VNC + XFCE
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xfce4 xfce4-terminal x11vnc xvfb wget git curl dbus-x11
+            xfce4 xfce4-terminal x11vnc xvfb dbus-x11
+          echo "✅ Installed"
 
-          echo "✅ VNC + XFCE installed"
-
-      - name: Create User
+      - name: Start Display & VNC
         run: |
-          PASSWORD=$(openssl rand -base64 12 | head -c 15)
-
-          sudo useradd -m -s /bin/bash RDP 2>/dev/null || true
-          echo "RDP:$PASSWORD" | sudo chpasswd
-          sudo usermod -aG sudo,video,audio RDP
-
-          mkdir -p /home/RDP/.vnc
-          echo "$PASSWORD" | vncpasswd -f > /home/RDP/.vnc/passwd
-          chmod 600 /home/RDP/.vnc/passwd
-
-          echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
-          echo "✅ User created"
-
-      - name: Start Virtual Display & VNC
-        run: |
-          # Start Xvfb
-          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp > /tmp/xvfb.log 2>&1 &
-          export DISPLAY=:99
-          sleep 3
-
+          # Start virtual display
+          Xvfb :99 -screen 0 1920x1080x24 > /tmp/xvfb.log 2>&1 &
+          sleep 2
+          
           # Start XFCE
-          startxfce4 > /tmp/xfce.log 2>&1 &
+          DISPLAY=:99 startxfce4 > /tmp/xfce.log 2>&1 &
           sleep 5
+          
+          # Start VNC (no password needed)
+          DISPLAY=:99 x11vnc -forever -nopw -rfbport 5900 -bg
+          
+          sleep 2
+          ps aux | grep x11vnc | grep -v grep
+          echo "✅ VNC ready on port 5900"
 
-          # Start VNC server
-          x11vnc -display :99 -forever -usepw -rfbport 5900 -nolisten unix -bg
-
-          sleep 3
-          ps aux | grep -E "x11vnc|Xvfb|xfce4" | grep -v grep
-
-          echo "✅ VNC running on port 5900"
-
-      - name: Install Tailscale
+      - name: Connect Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable tailscaled
           sudo systemctl start tailscaled
           sleep 5
-
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }}
-
-          TAILSCALE_IP=""
-          for i in {1..10}; do
-            TAILSCALE_IP=$(sudo tailscale ip -4)
-            [ -n "$TAILSCALE_IP" ] && break
-            sleep 5
-          done
-
-          if [ -z "$TAILSCALE_IP" ]; then
-            echo "❌ Tailscale failed"
+          
+          echo "Connecting Tailscale..."
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=vnc-${{ github.run_id }}
+          
+          sleep 10
+          
+          IP=$(sudo tailscale ip -4)
+          echo "Tailscale IP: $IP"
+          
+          if [ -z "$IP" ]; then
+            echo "ERROR: Tailscale auth failed!"
+            echo "Check your TAILSCALE_AUTH_KEY secret"
+            sudo tailscale status
             exit 1
           fi
+          
+          echo "TAILSCALE_IP=$IP" >> $GITHUB_ENV
 
-          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale: $TAILSCALE_IP"
-
-      - name: Display Connection Info
+      - name: Connection Info
         run: |
           echo ""
-          echo "=== VNC ACCESS ==="
-          echo "Server: $TAILSCALE_IP:5900"
-          echo "Password: $(echo $RDP_CREDS | cut -d' ' -f4)"
-          echo "==================="
+          echo "════════════════════════════════════════"
+          echo "🖥️  VNC DESKTOP READY!"
+          echo "════════════════════════════════════════"
           echo ""
-          echo "📥 How to Connect:"
-          echo "1. Download VNC Viewer: https://www.realvnc.com/download/viewer/"
+          echo "📱 Server: $TAILSCALE_IP:5900"
+          echo "🔑 Password: (none - click Connect)"
+          echo ""
+          echo "📥 Steps:"
+          echo "1. Download: https://www.realvnc.com/download/viewer/"
           echo "2. Server: $TAILSCALE_IP:5900"
-          echo "3. Password: $(echo $RDP_CREDS | cut -d' ' -f4)"
+          echo "3. Click Connect"
           echo ""
+          echo "════════════════════════════════════════"
 
       - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date +'%H:%M:%S')] VNC Active - $TAILSCALE_IP:5900"
+            echo "$(date) - VNC Active: $TAILSCALE_IP:5900"
             sleep 300
           done
