@@ -12,10 +12,10 @@ jobs:
   rdp-desktop:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       # ⭐ Free disk space
       - name: Free Disk Space
         run: |
@@ -23,7 +23,7 @@ jobs:
           sudo apt-get clean && sudo apt-get autoclean -y 2>/dev/null
           sudo rm -rf /opt/* /var/cache/* /tmp/* 2>/dev/null
           df -h /
-      
+
       # ⭐ Enable KVM
       - name: Enable KVM
         run: |
@@ -33,32 +33,32 @@ jobs:
           sudo chmod 666 /dev/kvm
           sudo usermod -a -G kvm $USER
           ls -la /dev/kvm
-      
+
       # ⭐ Install XFCE + XRDP
       - name: Install XFCE & XRDP
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             xfce4 xfce4-terminal xrdp wget git curl dbus-x11
-          
+
           sudo systemctl enable xrdp
           sudo systemctl start xrdp
           sleep 5
           sudo systemctl status xrdp | head -3
-      
+
       # ⭐ Create RDP User
       - name: Create RDP User
         run: |
           sudo useradd -m -s /bin/bash rdpuser 2>/dev/null || true
           echo "rdpuser:Android@123" | sudo chpasswd
           sudo usermod -aG sudo,kvm rdpuser
-          
+
           echo "xfce4-session" | sudo tee /home/rdpuser/.xsession > /dev/null
           sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
-          
+
           echo "✅ RDP User Created"
           id rdpuser
-      
+
       # ⭐ Setup Tailscale
       - name: Install Tailscale
         run: |
@@ -66,14 +66,14 @@ jobs:
           sudo systemctl enable tailscaled
           sudo systemctl start tailscaled
           sleep 3
-          
+
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-${{ github.run_id }}
           sleep 5
-          
+
           TAILSCALE_IP=$(sudo tailscale ip -4)
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
           echo "✅ Tailscale Connected: $TAILSCALE_IP"
-      
+
       # ⭐ Display Connection Info
       - name: Display RDP Connection Info
         run: |
@@ -101,16 +101,16 @@ jobs:
           echo ""
           echo "=========================================="
           echo ""
-      
+
       # ⭐ Keep Alive
       - name: Keep Session Active
         run: |
-          DURATION=${{ github.event.inputs.duration || '6' }}
+          DURATION=${{ github.event.inputs.duration }}
           SECONDS=$((DURATION * 3600))
           echo "🚀 RDP Session Running for $DURATION hours..."
           echo "   Server: $TAILSCALE_IP:3389"
           echo ""
-          
+
           for ((i=0; i<$((SECONDS/300)); i++)); do
             sleep 300
             STATUS=$(sudo systemctl is-active xrdp)
