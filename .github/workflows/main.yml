@@ -1,98 +1,65 @@
-name: VNC-Desktop-with-KVM
+name: RDP
 
 on:
   workflow_dispatch:
-    inputs:
-      duration:
-        description: 'Duration in hours'
-        required: true
-        default: '6'
 
 jobs:
-  vnc-desktop:
+  secure-rdp:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+    timeout-minutes: 3600
+    
     steps:
-      - uses: actions/checkout@v4
-
-      # ⭐ Free disk space
-      - name: Free Disk Space
-        run: |
-          sudo rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/locale/* 2>/dev/null
-          sudo apt-get clean && sudo apt-get autoclean -y 2>/dev/null
-          sudo rm -rf /opt/* /var/cache/* /tmp/* 2>/dev/null
-          df -h /
-
-      # ⭐ Enable KVM
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          sudo chmod 666 /dev/kvm
-          sudo usermod -a -G kvm $USER
-          ls -la /dev/kvm
-
-      # ⭐ Install XFCE + VNC (WORKS ON HEADLESS!)
-      - name: Install XFCE & VNC Server
+      # ⭐ Configure Core RDP Settings
+      - name: Configure Core RDP Settings
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xfce4 xfce4-terminal tightvncserver xvfb x11vnc wget git curl dbus-x11
+            xfce4 xfce4-terminal xrdp xvfb wget git curl dbus-x11
           
-          echo "✅ XFCE + VNC installed"
-
-      # ⭐ Create VNC User & Setup
-      - name: Create VNC User & Setup Display
-        run: |
-          # Create user
-          sudo useradd -m -s /bin/bash vncuser 2>/dev/null || true
-          echo "vncuser:VNC@123" | sudo chpasswd
-          sudo usermod -aG sudo,kvm,video,audio vncuser
+          sudo systemctl stop xrdp || true
           
-          # Create .vnc directory
-          mkdir -p ~/.vnc
-          
-          # Set VNC password
-          echo "VNC@123" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
-          
-          # Create VNC xstartup
-          cat > ~/.vnc/xstartup << 'VNCSTART'
+          # Configure XRDP startwm script
+          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'EOF'
           #!/bin/bash
-          export DISPLAY=:1
-          export LANG=en_US.UTF-8
-          startxfce4 &
-          VNCSTART
+          export DISPLAY=:0
+          Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp > /tmp/xvfb.log 2>&1 &
+          sleep 2
+          exec /usr/bin/xfce4-session
+          EOF
           
-          chmod +x ~/.vnc/xstartup
+          sudo chmod +x /etc/xrdp/startwm.sh
           
-          echo "✅ VNC User configured"
+          # Enable and start XRDP
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sleep 3
+          
+          echo "✅ XRDP configured"
 
-      # ⭐ Start Virtual Display + VNC Server
-      - name: Start Xvfb & VNC Server
+      # ⭐ Create RDP User with Secure Password
+      - name: Create RDP User with Secure Password
         run: |
-          # Start Xvfb (virtual display)
-          Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp > /tmp/xvfb.log 2>&1 &
-          sleep 3
+          # Generate random password
+          PASSWORD=$(openssl rand -base64 12 | head -c 15)
           
-          # Start XFCE on virtual display
-          export DISPLAY=:1
-          startxfce4 > /tmp/xfce.log 2>&1 &
-          sleep 5
+          # Create user
+          sudo useradd -m -s /bin/bash RDP 2>/dev/null || true
+          echo "RDP:$PASSWORD" | sudo chpasswd
           
-          # Start VNC Server (x11vnc - works with existing display)
-          x11vnc -display :1 -forever -nopw -rfbport 5900 -bg -nolisten unix
+          # Add to groups
+          sudo usermod -aG sudo,video,audio RDP
           
-          sleep 3
+          # Create .xsession
+          echo "xfce4-session" | sudo tee /home/RDP/.xsession > /dev/null
+          sudo chown RDP:RDP /home/RDP/.xsession
+          sudo chmod 755 /home/RDP/.xsession
           
-          # Verify VNC is running
-          ps aux | grep -E "x11vnc|Xvfb|xfce4" | grep -v grep
+          # Export credentials
+          echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
           
-          echo "✅ VNC Server started on port 5900"
+          echo "✅ RDP User created"
 
-      # ⭐ Setup Tailscale
+      # ⭐ Install Tailscale
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
@@ -100,68 +67,52 @@ jobs:
           sudo systemctl start tailscaled
           sleep 5
           
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-vnc-${{ github.run_id }}
-          sleep 5
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }}
           
-          TAILSCALE_IP=$(sudo tailscale ip -4)
+          # Wait for Tailscale IP
+          TAILSCALE_IP=""
+          RETRIES=0
+          while [ -z "$TAILSCALE_IP" ] && [ $RETRIES -lt 10 ]; do
+            TAILSCALE_IP=$(sudo tailscale ip -4)
+            if [ -z "$TAILSCALE_IP" ]; then
+              sleep 5
+              RETRIES=$((RETRIES + 1))
+            fi
+          done
+          
           if [ -z "$TAILSCALE_IP" ]; then
-            echo "Failed to get Tailscale IP"
+            echo "❌ Tailscale IP not assigned!"
             exit 1
           fi
           
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale: $TAILSCALE_IP"
+          echo "✅ Tailscale IP: $TAILSCALE_IP"
 
-      # ⭐ Display Connection Info
-      - name: Display VNC Connection Info
+      # ⭐ Verify RDP Accessibility
+      - name: Verify RDP Accessibility
+        run: |
+          XRDP_STATUS=$(sudo systemctl is-active xrdp)
+          echo "XRDP Status: $XRDP_STATUS"
+          
+          if [ "$XRDP_STATUS" != "active" ]; then
+            echo "⚠️  XRDP not active"
+            exit 1
+          fi
+          
+          echo "✅ RDP Accessibility verified"
+
+      # ⭐ Maintain Connection
+      - name: Maintain Connection
         run: |
           echo ""
-          echo "=========================================="
-          echo "✅ VNC DESKTOP READY!"
-          echo "=========================================="
-          echo ""
-          echo "🖥️  VNC CONNECTION DETAILS:"
-          echo "   Server: $TAILSCALE_IP:5900"
-          echo "   Password: VNC@123"
-          echo ""
-          echo "🎯 How to Connect:"
-          echo "   1. Download VNC Viewer (RealVNC, TightVNC, etc)"
-          echo "   2. Server: $TAILSCALE_IP:5900"
-          echo "   3. Password: VNC@123"
-          echo "   4. Click Connect"
-          echo ""
-          echo "✨ Desktop Features:"
-          echo "   ✅ XFCE4 Desktop"
-          echo "   ✅ KVM Enabled (for Android emulator)"
-          echo "   ✅ 30GB+ Free Space"
-          echo ""
-          echo "📝 Inside Desktop:"
-          echo "   1. Download Android Studio"
-          echo "   2. Install & Configure SDK"
-          echo "   3. Create AVD (KVM accelerated!)"
-          echo ""
-          echo "=========================================="
-          echo ""
-
-      # ⭐ Keep Alive
-      - name: Keep Session Active
-        run: |
-          DURATION=${{ github.event.inputs.duration }}
-          SECONDS=$((DURATION * 3600))
-          echo "🚀 VNC Session Active for $DURATION hours"
-          echo "   Server: $TAILSCALE_IP:5900"
+          echo "=== RDP ACCESS ==="
+          echo "Address: $TAILSCALE_IP:3389"
+          echo "Username: RDP"
+          echo "Password: $(echo $RDP_CREDS | cut -d' ' -f4)"
+          echo "==================="
           echo ""
           
-          for ((i=0; i<$((SECONDS/300)); i++)); do
+          while true; do
+            echo "[$(date +'%H:%M:%S')] RDP Active - Use Ctrl+C in workflow to terminate"
             sleep 300
-            VNC_RUNNING=$(pgrep -f x11vnc | wc -l)
-            if [ $VNC_RUNNING -gt 0 ]; then
-              echo "[$((i*5)) min] VNC: Running ✅"
-            else
-              echo "[$((i*5)) min] VNC: Restarting..."
-              pkill -f x11vnc || true
-              sleep 2
-              export DISPLAY=:1
-              x11vnc -display :1 -forever -nopw -rfbport 5900 -bg -nolisten unix
-            fi
           done
