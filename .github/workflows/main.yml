@@ -1,4 +1,4 @@
-name: RDP-Desktop-with-KVM-WORKING
+name: VNC-Desktop-with-KVM
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: '6'
 
 jobs:
-  rdp-desktop:
+  vnc-desktop:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -34,85 +34,63 @@ jobs:
           sudo usermod -a -G kvm $USER
           ls -la /dev/kvm
 
-      # ⭐ Install XFCE + XRDP (FIXED VERSION)
-      - name: Install XFCE & XRDP
+      # ⭐ Install XFCE + VNC (WORKS ON HEADLESS!)
+      - name: Install XFCE & VNC Server
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xfce4 xfce4-terminal xrdp xvfb wget git curl dbus-x11 x11-utils
+            xfce4 xfce4-terminal tightvncserver xvfb x11vnc wget git curl dbus-x11
           
-          # Create XRDP startwm script
-          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'XRDPSCRIPT'
-          #!/bin/bash
-          
-          export DISPLAY=:0
-          export LANG=en_US.UTF-8
-          
-          # Start Xvfb if needed
-          Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp &
-          XVFB_PID=$!
-          sleep 2
-          
-          # Start XFCE
-          startxfce4
-          
-          kill $XVFB_PID 2>/dev/null || true
-          XRDPSCRIPT
-          
-          sudo chmod +x /etc/xrdp/startwm.sh
-          
-          # Configure XRDP
-          sudo tee -a /etc/xrdp/xrdp.ini > /dev/null << 'XRDPINI'
-          
-          [xrdp1]
-          name=Xvfb
-          lib=libvnc.so
-          username=ask
-          password=ask
-          ip=127.0.0.1
-          port=5900
-          
-          XRDPINI
-          
-          # Allow XRDP to bind to all interfaces
-          sudo sed -i 's/port=-1/port=3389/' /etc/xrdp/xrdp.ini
-          
-          # Restart XRDP
-          sudo systemctl stop xrdp || true
-          sleep 2
-          sudo systemctl start xrdp
-          sleep 3
-          
-          # Verify XRDP is listening
-          sudo netstat -tlnp 2>/dev/null | grep 3389 || sudo ss -tlnp 2>/dev/null | grep 3389
-          
-          echo "✅ XRDP configured and running"
+          echo "✅ XFCE + VNC installed"
 
-      # ⭐ Create RDP User with proper permissions
-      - name: Create RDP User & Setup Sessions
+      # ⭐ Create VNC User & Setup
+      - name: Create VNC User & Setup Display
         run: |
           # Create user
-          sudo useradd -m -s /bin/bash rdpuser 2>/dev/null || true
-          echo "rdpuser:Android@123" | sudo chpasswd
+          sudo useradd -m -s /bin/bash vncuser 2>/dev/null || true
+          echo "vncuser:VNC@123" | sudo chpasswd
+          sudo usermod -aG sudo,kvm,video,audio vncuser
           
-          # Add to groups
-          sudo usermod -aG sudo,kvm,video,audio rdpuser
+          # Create .vnc directory
+          mkdir -p ~/.vnc
           
-          # Create proper XFCE session
-          mkdir -p ~/.config/xfce4/xfconf/xfce-perchannel-xml
-          sudo mkdir -p /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml
-          sudo mkdir -p /home/rdpuser/.local/share/xfce4
+          # Set VNC password
+          echo "VNC@123" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
           
-          echo "xfce4-session" | sudo tee /home/rdpuser/.xsession > /dev/null
-          sudo chmod 755 /home/rdpuser/.xsession
-          sudo chown -R rdpuser:rdpuser /home/rdpuser/.config /home/rdpuser/.local
+          # Create VNC xstartup
+          cat > ~/.vnc/xstartup << 'VNCSTART'
+          #!/bin/bash
+          export DISPLAY=:1
+          export LANG=en_US.UTF-8
+          startxfce4 &
+          VNCSTART
           
-          # Create .Xauthority
-          sudo touch /home/rdpuser/.Xauthority
-          sudo chown rdpuser:rdpuser /home/rdpuser/.Xauthority
+          chmod +x ~/.vnc/xstartup
           
-          echo "✅ RDP User Configured"
-          id rdpuser
+          echo "✅ VNC User configured"
+
+      # ⭐ Start Virtual Display + VNC Server
+      - name: Start Xvfb & VNC Server
+        run: |
+          # Start Xvfb (virtual display)
+          Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp > /tmp/xvfb.log 2>&1 &
+          sleep 3
+          
+          # Start XFCE on virtual display
+          export DISPLAY=:1
+          startxfce4 > /tmp/xfce.log 2>&1 &
+          sleep 5
+          
+          # Start VNC Server (x11vnc - works with existing display)
+          x11vnc -display :1 -forever -nopw -rfbport 5900 -bg -nolisten unix
+          
+          sleep 3
+          
+          # Verify VNC is running
+          ps aux | grep -E "x11vnc|Xvfb|xfce4" | grep -v grep
+          
+          echo "✅ VNC Server started on port 5900"
 
       # ⭐ Setup Tailscale
       - name: Install Tailscale
@@ -122,69 +100,35 @@ jobs:
           sudo systemctl start tailscaled
           sleep 5
           
-          # Connect Tailscale with better error handling
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-${{ github.run_id }} || {
-            echo "Tailscale auth failed! Check your TAILSCALE_AUTH_KEY secret"
-            exit 1
-          }
-          
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-vnc-${{ github.run_id }}
           sleep 5
           
-          # Get IP with verification
           TAILSCALE_IP=$(sudo tailscale ip -4)
           if [ -z "$TAILSCALE_IP" ]; then
             echo "Failed to get Tailscale IP"
-            sudo tailscale status
             exit 1
           fi
           
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale Connected: $TAILSCALE_IP"
-          sudo tailscale status | head -5
-
-      # ⭐ Verify XRDP accessibility
-      - name: Verify XRDP & Tailscale
-        run: |
-          echo "Testing XRDP connectivity..."
-          
-          # Check XRDP listening
-          echo "XRDP Status:"
-          sudo systemctl status xrdp | head -3
-          
-          # Check port
-          echo ""
-          echo "Port 3389 Status:"
-          sudo netstat -tlnp 2>/dev/null | grep 3389 || sudo ss -tlnp 2>/dev/null | grep 3389 || echo "Port not found in netstat"
-          
-          # Check Tailscale
-          echo ""
-          echo "Tailscale Status:"
-          sudo tailscale status | head -3
-          
-          # Verify connection works from localhost
-          echo ""
-          echo "Testing local RDP connection..."
-          timeout 5 bash -c 'echo "test" | nc -w 1 127.0.0.1 3389' 2>/dev/null && echo "✅ Port 3389 responsive" || echo "⚠️  Port 3389 check done"
+          echo "✅ Tailscale: $TAILSCALE_IP"
 
       # ⭐ Display Connection Info
-      - name: Display RDP Connection Info
+      - name: Display VNC Connection Info
         run: |
           echo ""
           echo "=========================================="
-          echo "✅ RDP DESKTOP READY!"
+          echo "✅ VNC DESKTOP READY!"
           echo "=========================================="
           echo ""
-          echo "📱 CONNECTION DETAILS:"
-          echo "   Server: $TAILSCALE_IP:3389"
-          echo "   Username: rdpuser"
-          echo "   Password: Android@123"
+          echo "🖥️  VNC CONNECTION DETAILS:"
+          echo "   Server: $TAILSCALE_IP:5900"
+          echo "   Password: VNC@123"
           echo ""
-          echo "🎯 Connection Steps:"
-          echo "   1. Make sure you're on the same Tailscale network"
-          echo "   2. Download RDP client (Windows Remote Desktop, Remmina, etc)"
-          echo "   3. Server: $TAILSCALE_IP:3389"
-          echo "   4. Username: rdpuser"
-          echo "   5. Password: Android@123"
+          echo "🎯 How to Connect:"
+          echo "   1. Download VNC Viewer (RealVNC, TightVNC, etc)"
+          echo "   2. Server: $TAILSCALE_IP:5900"
+          echo "   3. Password: VNC@123"
+          echo "   4. Click Connect"
           echo ""
           echo "✨ Desktop Features:"
           echo "   ✅ XFCE4 Desktop"
@@ -204,13 +148,20 @@ jobs:
         run: |
           DURATION=${{ github.event.inputs.duration }}
           SECONDS=$((DURATION * 3600))
-          echo "🚀 RDP Session Active for $DURATION hours"
-          echo "   Server: $TAILSCALE_IP:3389"
+          echo "🚀 VNC Session Active for $DURATION hours"
+          echo "   Server: $TAILSCALE_IP:5900"
           echo ""
           
           for ((i=0; i<$((SECONDS/300)); i++)); do
             sleep 300
-            XRDP_STATUS=$(sudo systemctl is-active xrdp)
-            TS_STATUS=$(sudo tailscale status | grep -c "100.") || TS_STATUS="0"
-            echo "[$((i*5)) min] XRDP: $XRDP_STATUS | Tailscale: Connected"
+            VNC_RUNNING=$(pgrep -f x11vnc | wc -l)
+            if [ $VNC_RUNNING -gt 0 ]; then
+              echo "[$((i*5)) min] VNC: Running ✅"
+            else
+              echo "[$((i*5)) min] VNC: Restarting..."
+              pkill -f x11vnc || true
+              sleep 2
+              export DISPLAY=:1
+              x11vnc -display :1 -forever -nopw -rfbport 5900 -bg -nolisten unix
+            fi
           done
