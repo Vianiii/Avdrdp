@@ -1,4 +1,4 @@
-name: RDP-Desktop-with-KVM
+name: RDP-Desktop-with-KVM-FINAL
 
 on:
   workflow_dispatch:
@@ -16,121 +16,103 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      # ⭐ STEP 1: Free disk space
-      - name: Free Disk Space (50GB+)
+      # ⭐ Free disk space
+      - name: Free Disk Space
         run: |
-          echo "🔥 Freeing disk space..."
           sudo rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/locale/* 2>/dev/null
           sudo apt-get clean && sudo apt-get autoclean -y 2>/dev/null
           sudo rm -rf /opt/* /var/cache/* /tmp/* 2>/dev/null
           df -h /
       
-      # ⭐ STEP 2: Enable KVM (for future Android emulator use)
+      # ⭐ Enable KVM
       - name: Enable KVM
         run: |
-          echo "Enabling KVM..."
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           sudo chmod 666 /dev/kvm
           sudo usermod -a -G kvm $USER
-          
-          echo "✅ KVM enabled"
           ls -la /dev/kvm
       
-      # ⭐ STEP 3: Install Desktop + RDP only
-      - name: Install XFCE Desktop & XRDP
+      # ⭐ Install XFCE + XRDP
+      - name: Install XFCE & XRDP
         run: |
-          echo "Installing desktop environment..."
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xfce4 xfce4-terminal xrdp wget git
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xfce4 xfce4-terminal xrdp wget git curl dbus-x11
           
-          # Configure XRDP
-          echo "xfce4-session" > ~/.xsession
           sudo systemctl enable xrdp
           sudo systemctl start xrdp
-          
-          echo "✅ Desktop installed"
-          df -h /
+          sleep 5
+          sudo systemctl status xrdp | head -3
       
-      # ⭐ STEP 4: Create RDP user
+      # ⭐ Create RDP User
       - name: Create RDP User
         run: |
-          echo "Creating RDP user..."
-          
-          # Create user
           sudo useradd -m -s /bin/bash rdpuser 2>/dev/null || true
           echo "rdpuser:Android@123" | sudo chpasswd
-          
-          # Add permissions
           sudo usermod -aG sudo,kvm rdpuser
           
-          # Create home dirs
-          sudo mkdir -p /home/rdpuser/.config/xfce4
-          sudo chown -R rdpuser:rdpuser /home/rdpuser
+          echo "xfce4-session" | sudo tee /home/rdpuser/.xsession > /dev/null
+          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
           
-          echo "✅ RDP user created"
-          echo "Username: rdpuser"
-          echo "Password: Android@123"
+          echo "✅ RDP User Created"
+          id rdpuser
       
-      # ⭐ STEP 5: Setup Tailscale
-      - name: Install & Connect Tailscale
+      # ⭐ Setup Tailscale
+      - name: Install Tailscale
         run: |
-          echo "Setting up Tailscale..."
-          
-          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable tailscaled
+          sudo systemctl start tailscaled
+          sleep 3
           
-          # Connect with auth key
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-${{ github.run_id }}
+          sleep 5
           
-          # Get IP
-          TAILSCALE_IP=$(tailscale ip -4)
+          TAILSCALE_IP=$(sudo tailscale ip -4)
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-          
-          echo "✅ Tailscale connected"
-          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "✅ Tailscale Connected: $TAILSCALE_IP"
       
-      # ⭐ STEP 6: Display Access Info
-      - name: Display RDP Access Information
+      # ⭐ Display Connection Info
+      - name: Display RDP Connection Info
         run: |
           echo ""
           echo "=========================================="
           echo "✅ RDP DESKTOP READY!"
           echo "=========================================="
           echo ""
-          echo "📱 RDP Connection Details:"
+          echo "📱 CONNECTION DETAILS:"
           echo "   Server: $TAILSCALE_IP:3389"
           echo "   Username: rdpuser"
           echo "   Password: Android@123"
           echo ""
-          echo "🖥️  Desktop Environment: XFCE4"
-          echo "🔧 KVM: Enabled (ready for Android emulator)"
+          echo "🎯 Steps to Connect:"
+          echo "   1. Download RDP client (Windows Remote Desktop, Remmina, etc)"
+          echo "   2. Enter server: $TAILSCALE_IP:3389"
+          echo "   3. Enter username: rdpuser"
+          echo "   4. Enter password: Android@123"
+          echo "   5. Click Connect"
           echo ""
-          echo "📥 Next Steps (Inside RDP):"
-          echo "   1. Download & Install Android Studio"
-          echo "   2. Configure Android SDK + AVD"
-          echo "   3. Launch AVD (uses KVM acceleration)"
-          echo ""
-          echo "📊 Available Disk Space:"
-          df -h / | tail -1 | awk '{print "   Used: " $3 "  Free: " $4}'
+          echo "✨ Inside Desktop:"
+          echo "   - Download Android Studio"
+          echo "   - Install & Configure SDK"
+          echo "   - Create AVD (KVM accelerated!)"
           echo ""
           echo "=========================================="
           echo ""
       
-      # ⭐ STEP 7: Keep Alive
+      # ⭐ Keep Alive
       - name: Keep Session Active
         run: |
           DURATION=${{ github.event.inputs.duration || '6' }}
           SECONDS=$((DURATION * 3600))
-          echo "Running for $DURATION hours..."
-          echo "RDP is active on: $TAILSCALE_IP:3389"
+          echo "🚀 RDP Session Running for $DURATION hours..."
+          echo "   Server: $TAILSCALE_IP:3389"
           echo ""
           
           for ((i=0; i<$((SECONDS/300)); i++)); do
             sleep 300
             STATUS=$(sudo systemctl is-active xrdp)
-            echo "[$((i*5)) min] XRDP Status: $STATUS"
+            echo "[$((i*5)) min] XRDP: $STATUS ✅"
           done
-          
-          echo "Session ended after $DURATION hours"
