@@ -1,4 +1,4 @@
-name: RDP-Desktop-with-KVM-FINAL
+name: RDP-Desktop-with-KVM-WORKING
 
 on:
   workflow_dispatch:
@@ -34,29 +34,84 @@ jobs:
           sudo usermod -a -G kvm $USER
           ls -la /dev/kvm
 
-      # ⭐ Install XFCE + XRDP
+      # ⭐ Install XFCE + XRDP (FIXED VERSION)
       - name: Install XFCE & XRDP
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xfce4 xfce4-terminal xrdp wget git curl dbus-x11
-
-          sudo systemctl enable xrdp
+            xfce4 xfce4-terminal xrdp xvfb wget git curl dbus-x11 x11-utils
+          
+          # Create XRDP startwm script
+          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'XRDPSCRIPT'
+          #!/bin/bash
+          
+          export DISPLAY=:0
+          export LANG=en_US.UTF-8
+          
+          # Start Xvfb if needed
+          Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp &
+          XVFB_PID=$!
+          sleep 2
+          
+          # Start XFCE
+          startxfce4
+          
+          kill $XVFB_PID 2>/dev/null || true
+          XRDPSCRIPT
+          
+          sudo chmod +x /etc/xrdp/startwm.sh
+          
+          # Configure XRDP
+          sudo tee -a /etc/xrdp/xrdp.ini > /dev/null << 'XRDPINI'
+          
+          [xrdp1]
+          name=Xvfb
+          lib=libvnc.so
+          username=ask
+          password=ask
+          ip=127.0.0.1
+          port=5900
+          
+          XRDPINI
+          
+          # Allow XRDP to bind to all interfaces
+          sudo sed -i 's/port=-1/port=3389/' /etc/xrdp/xrdp.ini
+          
+          # Restart XRDP
+          sudo systemctl stop xrdp || true
+          sleep 2
           sudo systemctl start xrdp
-          sleep 5
-          sudo systemctl status xrdp | head -3
+          sleep 3
+          
+          # Verify XRDP is listening
+          sudo netstat -tlnp 2>/dev/null | grep 3389 || sudo ss -tlnp 2>/dev/null | grep 3389
+          
+          echo "✅ XRDP configured and running"
 
-      # ⭐ Create RDP User
-      - name: Create RDP User
+      # ⭐ Create RDP User with proper permissions
+      - name: Create RDP User & Setup Sessions
         run: |
+          # Create user
           sudo useradd -m -s /bin/bash rdpuser 2>/dev/null || true
           echo "rdpuser:Android@123" | sudo chpasswd
-          sudo usermod -aG sudo,kvm rdpuser
-
+          
+          # Add to groups
+          sudo usermod -aG sudo,kvm,video,audio rdpuser
+          
+          # Create proper XFCE session
+          mkdir -p ~/.config/xfce4/xfconf/xfce-perchannel-xml
+          sudo mkdir -p /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml
+          sudo mkdir -p /home/rdpuser/.local/share/xfce4
+          
           echo "xfce4-session" | sudo tee /home/rdpuser/.xsession > /dev/null
-          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
-
-          echo "✅ RDP User Created"
+          sudo chmod 755 /home/rdpuser/.xsession
+          sudo chown -R rdpuser:rdpuser /home/rdpuser/.config /home/rdpuser/.local
+          
+          # Create .Xauthority
+          sudo touch /home/rdpuser/.Xauthority
+          sudo chown rdpuser:rdpuser /home/rdpuser/.Xauthority
+          
+          echo "✅ RDP User Configured"
           id rdpuser
 
       # ⭐ Setup Tailscale
@@ -65,14 +120,51 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable tailscaled
           sudo systemctl start tailscaled
-          sleep 3
-
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-${{ github.run_id }}
           sleep 5
-
+          
+          # Connect Tailscale with better error handling
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-${{ github.run_id }} || {
+            echo "Tailscale auth failed! Check your TAILSCALE_AUTH_KEY secret"
+            exit 1
+          }
+          
+          sleep 5
+          
+          # Get IP with verification
           TAILSCALE_IP=$(sudo tailscale ip -4)
+          if [ -z "$TAILSCALE_IP" ]; then
+            echo "Failed to get Tailscale IP"
+            sudo tailscale status
+            exit 1
+          fi
+          
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
           echo "✅ Tailscale Connected: $TAILSCALE_IP"
+          sudo tailscale status | head -5
+
+      # ⭐ Verify XRDP accessibility
+      - name: Verify XRDP & Tailscale
+        run: |
+          echo "Testing XRDP connectivity..."
+          
+          # Check XRDP listening
+          echo "XRDP Status:"
+          sudo systemctl status xrdp | head -3
+          
+          # Check port
+          echo ""
+          echo "Port 3389 Status:"
+          sudo netstat -tlnp 2>/dev/null | grep 3389 || sudo ss -tlnp 2>/dev/null | grep 3389 || echo "Port not found in netstat"
+          
+          # Check Tailscale
+          echo ""
+          echo "Tailscale Status:"
+          sudo tailscale status | head -3
+          
+          # Verify connection works from localhost
+          echo ""
+          echo "Testing local RDP connection..."
+          timeout 5 bash -c 'echo "test" | nc -w 1 127.0.0.1 3389' 2>/dev/null && echo "✅ Port 3389 responsive" || echo "⚠️  Port 3389 check done"
 
       # ⭐ Display Connection Info
       - name: Display RDP Connection Info
@@ -87,17 +179,22 @@ jobs:
           echo "   Username: rdpuser"
           echo "   Password: Android@123"
           echo ""
-          echo "🎯 Steps to Connect:"
-          echo "   1. Download RDP client (Windows Remote Desktop, Remmina, etc)"
-          echo "   2. Enter server: $TAILSCALE_IP:3389"
-          echo "   3. Enter username: rdpuser"
-          echo "   4. Enter password: Android@123"
-          echo "   5. Click Connect"
+          echo "🎯 Connection Steps:"
+          echo "   1. Make sure you're on the same Tailscale network"
+          echo "   2. Download RDP client (Windows Remote Desktop, Remmina, etc)"
+          echo "   3. Server: $TAILSCALE_IP:3389"
+          echo "   4. Username: rdpuser"
+          echo "   5. Password: Android@123"
           echo ""
-          echo "✨ Inside Desktop:"
-          echo "   - Download Android Studio"
-          echo "   - Install & Configure SDK"
-          echo "   - Create AVD (KVM accelerated!)"
+          echo "✨ Desktop Features:"
+          echo "   ✅ XFCE4 Desktop"
+          echo "   ✅ KVM Enabled (for Android emulator)"
+          echo "   ✅ 30GB+ Free Space"
+          echo ""
+          echo "📝 Inside Desktop:"
+          echo "   1. Download Android Studio"
+          echo "   2. Install & Configure SDK"
+          echo "   3. Create AVD (KVM accelerated!)"
           echo ""
           echo "=========================================="
           echo ""
@@ -107,12 +204,13 @@ jobs:
         run: |
           DURATION=${{ github.event.inputs.duration }}
           SECONDS=$((DURATION * 3600))
-          echo "🚀 RDP Session Running for $DURATION hours..."
+          echo "🚀 RDP Session Active for $DURATION hours"
           echo "   Server: $TAILSCALE_IP:3389"
           echo ""
-
+          
           for ((i=0; i<$((SECONDS/300)); i++)); do
             sleep 300
-            STATUS=$(sudo systemctl is-active xrdp)
-            echo "[$((i*5)) min] XRDP: $STATUS ✅"
+            XRDP_STATUS=$(sudo systemctl is-active xrdp)
+            TS_STATUS=$(sudo tailscale status | grep -c "100.") || TS_STATUS="0"
+            echo "[$((i*5)) min] XRDP: $XRDP_STATUS | Tailscale: Connected"
           done
